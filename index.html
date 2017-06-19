@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+
+body {
+  margin: 0;
+}
+
+caption {
+  fill: #000;
+  text-anchor: start;
+  font-weight: bold;
+}
+
+path {
+  fill: none;
+  stroke: #000;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.major_road { stroke: #776; }
+.minor_road { stroke: #ccb; }
+.highway { stroke: #f39; stroke-width: 1.5px; }
+.rail { stroke: #7de; }
+
+.density-rect {
+  opacity: 0.7;
+}
+
+.day {
+  stroke: #ccc;
+}
+
+.date-title {
+  font-size: 1.5em;
+}
+
+</style>
+<body>
+  <script src="https://d3js.org/d3.v4.min.js"></script>
+  <script src="https://d3js.org/d3-scale-chromatic.v1.min.js"></script>
+  <script src="https://d3js.org/d3-tile.v0.0.min.js"></script>
+  <script src="https://d3js.org/topojson.v2.min.js"></script>
+  <script>
+  var tau = 2 * Math.PI;
+
+  var width = 1120,
+      height = 760;
+      center = [116.3904, 39.9156];
+
+  var tiles = d3.tile()
+                .size([width, height]);
+
+  var projection = d3.geoMercator()
+                      .center(center)
+                      .scale(400000 / tau)
+                      .translate([width/2, height/2]);
+
+  var path = d3.geoPath()
+                .projection(projection);
+
+  var svg = d3.select("body").append("svg")
+              .attr("width", width)
+              .attr("height", height)
+
+  var first_load = true;
+
+  //道路类型图例
+  var road_types = [{en:'major_road', zh:'主干道'},
+                    {en:'minor_road', zh:'支路'},
+                    {en:'highway',    zh:'高速公路'},
+                    {en:'rail',       zh:'铁路'}];
+  var legend_roads = d3.select("body")
+                        .append("svg")
+                        .attr("width", 200)
+                        .attr("height", 150)
+                        .style('left', '1150px')
+                        .style('top', '20px')
+                        .style('position', 'absolute')
+                        .append("g");
+
+  legend_roads.selectAll('line')
+              .data(road_types)
+              .enter().append('line')
+              .attr('class', function(d) { return d.en; })
+              .attr('x1', 0)
+              .attr('y1', function(d, i) { return i*20 + 40; })
+              .attr('x2', 50)
+              .attr('y2', function(d, i) { return i*20 + 40; });
+
+  legend_roads.selectAll('text')
+              .data(road_types)
+              .enter().append('text')
+              .attr('x', 70)
+              .attr('y', function(d, i) { return i*20 + 45; })
+              .style("cursor", "pointer")
+              .text(function(d) { return d.zh })
+              .on('click', set_road_display);
+
+  legend_roads.append("text")
+              .attr("class", "caption")
+              .attr("x", 0)
+              .attr("y", 20)
+              .text("道路类型");
+
+  //有关密度的图例
+  var legend_x_width = [{x:0,   width:6},  {x:6,   width:13},  {x:19,  width:23},
+                        {x:42,  width:42}, {x:84,  width:49},  {x:133, width:56},
+                        {x:189, width:78}, {x:267, width:110}, {x:377, width:23},]
+
+  var density_legend = d3.select("body")
+                          .append("svg")
+                          .attr("width", 1120)
+                          .attr("height", 60)
+                          .style('left', '0')
+                          .style('top', '780px')
+                          .style('position', 'absolute')
+                        .append("g")
+                          .attr("transform", "translate(700,20)")
+                          .attr("font-size", 10)
+                          .attr("text-anchor", "middle")
+                          .attr("font-family", "sans-serif");
+
+  //垃圾短信分布密度
+  var color = null;
+  var type = null;
+
+  var density_legend_rect = density_legend.selectAll("rect")
+                                          .data(legend_x_width)
+                                          .enter().append("rect")
+                                          .attr("x", function(d) { return d.x; })
+                                          .attr("width", function(d) { return d.width; })
+                                          .attr("height", 8);
+  density_legend.append("text")
+                .attr("y", -6)
+                .attr("text-anchor", "start")
+                .attr("font-weight", "bold")
+                .attr("font-size", 12)
+                .text("区域内垃圾短信数量");
+  var tick_groups = density_legend.selectAll("g")
+                                  .data(legend_x_width.slice(1))
+                                  .enter().append("g")
+                                  .attr("transform", function(d) { return "translate(" + d.x + ",0)"});
+  tick_groups.append("line")
+             .attr("stroke", "black")
+             .attr("y2", 13)
+             .attr("x1", 0.5)
+             .attr("x2", 0.5);
+  var density_legend_tick_text = tick_groups.append("text")
+                                             .attr("fill", "black")
+                                             .attr("y", 16)
+                                             .attr("x", 0.5)
+                                             .attr("dy", "0.71em");
+  //每日垃圾短信严重程度
+  var severity_of_spam_color = d3.scaleThreshold()
+                                  .domain([20000,40000,60000])
+                                  .range(d3.schemeGreens[4]);
+
+  //本日垃圾短信数目日历视图
+  var cellSize = 25;
+
+  var calender_panel = d3.select("body")
+                      .append("svg")
+                      .attr("width", 200)
+                      .attr("height", 680)
+                      .style('left', '1150px')
+                      .style('top', '160px')
+                      .style('position', 'absolute');
+
+  var month_group = calender_panel.selectAll("g")
+                              .data(d3.range(1,4))
+                              .enter().append("g")
+                              .attr("transform", function(d, i) { return "translate(20," + (i*180 + 70) + ")"; });
+
+  var year = d3.timeFormat("%Y"),
+      month = d3.timeFormat("%m"),
+      week = d3.timeFormat("%U");
+  var days = month_group.selectAll(".day")
+                        .data(function(d) { return d3.timeDays(new Date(2017, d, 1), new Date(2017, d+1, 1)); })
+                        .enter().append("rect")
+                        .attr("class", "day")
+                        .attr("fill", "#fff")
+                        .attr("width", cellSize)
+                        .attr("height", cellSize)
+                        .attr("x", function(d) { return d3.timeFormat("%w")(d) * cellSize; })
+                        .attr("y", function(d) {
+                          return (week(d) - week(new Date(year(d), month(d)-1, 1))) * cellSize;
+                        })
+                        .datum(d3.timeFormat("%Y%m%d"));
+
+  var month_titles = month_group.selectAll('.month-title')
+                                .data(function(d) { return d3.timeMonths(new Date(2017, d, 1), new Date(2017, d+1, 1)); })
+                                .enter().append("text")
+                                .text(function(d) { return d.toLocaleString("zh-Hans", {month: "long"}); });
+
+  var date_title = calender_panel.append("text")
+                              .attr("class", "date-title")
+                              .attr("y", 30)
+                              .text("2017年02月23日");
+
+  var legend_sos = calender_panel.append("g")
+                                  .attr("transform", "translate(0, 600)")
+                                  .attr("width", 200)
+                                  .attr("height", 60);
+  var margin = 30;
+  legend_sos.selectAll("rect")
+            .data(severity_of_spam_color.range())
+            .enter().append("rect")
+            .attr("x", function(d,i) { return i*40 + 25; })
+            .attr("y", margin)
+            .attr("width", 40)
+            .attr("height", 10)
+            .attr("fill", function(d) { return d; });
+
+  legend_sos.selectAll("path")
+            .data(severity_of_spam_color.domain())
+            .enter().append("path")
+            .style("stroke", "black")
+            .attr("d", function(d,i) { return "M" + ((i+1)*40+25) + " " + margin + " V " + (margin+15); });
+
+  legend_sos.selectAll("text")
+            .data(severity_of_spam_color.domain())
+            .enter().append("text")
+            .attr("x", function(d,i) { return (i+1)*40+25; })
+            .attr("y", margin+25)
+            .style("font-size", "10px")
+            .style("text-anchor", "middle")
+            .text(function(d) { return d; });
+
+  legend_sos.append("text")
+            .attr("x", 20)
+            .attr("y", 15)
+            .attr("class", "caption")
+            .text("垃圾短信数量等级");
+
+  d3.csv("data/daily_spam_num.csv", function(err, csv) {
+    if(err) throw err;
+    var data = d3.nest()
+                  .key(function(d) { return d.date; })
+                  .rollup(function(d) { return +d[0].number; })
+                  .map(csv);
+    days.filter(function(d) { return ("$"+d) in data;})
+        .attr("fill", function(d) { return severity_of_spam_color(data[("$"+d)]); })
+        .on('click', clicked)
+        .append("title")
+        .text(function(d) { return d3.timeFormat("%m月%d日")(d3.timeParse("%Y%m%d")(d)) + "的垃圾短信条数为:" + data[("$"+d)].toLocaleString(); });
+
+    function clicked() {
+      var d = d3.select(this).datum();
+      update_date(d);
+      date_title.text(d3.timeFormat("%Y年%m月%d日")(d3.timeParse("%Y%m%d")(d)));
+    }
+  });
+
+  //垃圾短信种类选择单选框
+  var radio_buttons_for_selecting_class = d3.select("body")
+                                              .append("svg")
+                                              .attr("width", 720)
+                                              .attr("height", 60)
+                                              .style('left', '0')
+                                              .style('top', '780px')
+                                              .style('position', 'absolute')
+                                            .append("g")
+                                              .attr("font-family", "sans-serif");
+  radio_buttons_for_selecting_class.append("text")
+                                    .attr("font-size", 14)
+                                    .attr("font-weight", "bold")
+                                    .attr("x", 30)
+                                    .attr("y", 15)
+                                    .text("短信类型选择");
+
+  var class2color = [{class:'全部', color:'#B30000', scale: d3.scaleThreshold().domain([1, 5, 25, 100, 250, 500, 1000, 2000]).range(d3.schemeOrRd[9])},
+                     {class:'代开发票或办证', color:'#06ADBE', scale: d3.scaleThreshold().domain([1, 5, 25, 100, 250, 500, 1000, 2000]).range(d3.schemeBlues[9])},
+                     {class:'淫秽广告', color:'#FF7F0E', scale: d3.scaleThreshold().domain([1, 5, 25, 100, 250, 500, 1000, 2000]).range(d3.schemeOranges[9])},
+                     {class:'冒充机构诈骗', color:'#A34CB1', scale: d3.scaleThreshold().domain([1, 5, 25, 100, 250, 500, 1000, 2000]).range(d3.schemePurples[9])}];
+  var radio_button_groups = radio_buttons_for_selecting_class.selectAll("g")
+                                                              .data(class2color)
+                                                              .enter().append("g")
+                                                              .attr("width", 150)
+                                                              .attr("height", 40)
+                                                              .attr("transform", function(d,i) { return "translate(" + (i*150 + 30) + ",25)"})
+                                                              .attr("id", function(d) { return d.class; })
+                                                              .style("cursor", "pointer")
+                                                              .style("opacity", "0.5")
+                                                              .on('click', function() {
+                                                                d3.select(this.parentNode).selectAll("g").style("opacity", "0.5");
+                                                                var n = d3.select(this);
+                                                                n.style("opacity", "1");
+                                                                color = n.datum().scale;
+                                                                type = n.attr("id");
+                                                                density_legend_rect.attr("fill", function(d, i) { return color.range()[i]; });
+                                                                density_legend_tick_text.text(function(d, i) { return color.domain()[i]; });
+                                                                update_date(d3.timeFormat("%Y%m%d")(d3.timeParse("%Y年%m月%d日")(date_title.text())));
+                                                              });
+  radio_button_groups.append("rect")
+                      .attr("width", 30)
+                      .attr("height", 20)
+                      .attr("fill", function(d) { return d.color;});
+  radio_button_groups.append("text")
+                      .attr("x", 35)
+                      .attr("y", 15)
+                      .text(function(d) { return d.class; });
+
+  d3.select("#全部").dispatch('click');
+
+  function set_road_display() {
+    //console.log(d3.select('.'+d3.select(this).datum().en).style('display'));
+    var road_type = '.'+d3.select(this).datum().en;
+    if(d3.select(road_type).style('display') == 'inline') {
+      d3.selectAll(road_type).style('display', 'none');
+    } else {
+      d3.selectAll(road_type).style('display', 'inline');
+    }
+  }
+
+  function update_date(date_str) {
+    d3.csv("data/" + date_str + "_classed_density.csv", function(data) {
+      var lnglat2class = d3.nest().key(function(d) { return "["+[d.lng, d.lat]+"]"; })
+                                  .rollup(function(arr) {
+                                    var dict = new Object();
+                                    arr.forEach(function(d) { dict[d.class] = +d.count; })
+                                    dict["全部"] = d3.sum(d3.values(dict));
+                                    return dict;
+                                  }).object(data);
+
+      var regions_of_density = svg.selectAll("rect")
+                                  .data(d3.keys(lnglat2class));
+
+      var entered_rect = regions_of_density.enter().append("rect")
+                          .attr("class", "density-rect")
+                          .attr("width", 11.1)
+                          .attr("height", 14.4);
+      entered_rect.append("title");
+      entered_rect.merge(regions_of_density)
+                  .attr("x", function(d) { return projection(eval(d))[0]; })
+                  .attr("y", function(d) { return projection(eval(d))[1]; })
+                  .attr("fill", function(d) {
+                    if(lnglat2class[d][type] == undefined) {
+                      return "none";
+                    } else {
+                      return color(lnglat2class[d][type]);
+                    }
+                  })
+                  .select("title").text(function(d) { return lnglat2class[d][type]; });
+
+      regions_of_density.exit()
+                        .remove();
+
+
+      if(first_load) {
+        first_load = false;
+
+        svg.selectAll("g")
+        .data(tiles
+          .scale(projection.scale() * tau)
+          .translate(projection([0,0]))())
+          .enter().append("g")
+          .each(function(d) {
+            var g = d3.select(this);
+	    //d3.json("https://vector.mapzen.com/osm/roads/" + d[2] + "/" + d[0] + "/" + d[1] + ".topojson?api_key=vector-tiles-LM25tq4", function(error, data) {
+            d3.json("data/mapzen_osm_roads_" + d[2] + "_" + d[0] + "_" + d[1] + ".json", function(error, data) {
+              if (error) throw error;
+
+              g.selectAll("path")
+              .data(topojson.feature(data, data.objects.roads).features.sort(function(a, b) { return a.properties.sort_key - b.properties.sort_key; }))
+              .enter().append("path")
+              .attr("class", function(d) { return d.properties.kind; })
+              .attr("d", path);
+            });
+          });
+      }
+    });
+  }
+
+  </script>
+</body>
